@@ -115,6 +115,7 @@ def room_keyboard(floor):
         if len(row) == 4 or i == len(rooms) - 1:
             rows.append(row)
             row = []
+    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="back_zone")])
     return InlineKeyboardMarkup(rows)
 
 def category_keyboard(is_room=True):
@@ -126,6 +127,7 @@ def category_keyboard(is_room=True):
         if len(row) == 2 or i == len(cats) - 1:
             rows.append(row)
             row = []
+    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="back_zone")])
     return InlineKeyboardMarkup(rows)
 
 def priority_keyboard():
