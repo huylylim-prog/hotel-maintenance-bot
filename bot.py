@@ -262,9 +262,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "back_zone":
         user_state[chat_id] = {"staff": staff_name}
         await query.edit_message_text(
-            "🏨 *Hotel Ratanakiri — Maintenance*
-"
-            "Select zone / ជ្រើសរើសតំបន់:",
+            "\U0001f3e8 *Hotel Ratanakiri \u2014 Maintenance*\nSelect zone / ជ្រើសរើសតំបន់:",
             parse_mode="Markdown",
             reply_markup=zone_keyboard()
         )
@@ -346,6 +344,4 @@ def main():
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    main()
-
     main()
