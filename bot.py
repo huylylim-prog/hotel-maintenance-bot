@@ -103,6 +103,7 @@ def floor_keyboard():
         [InlineKeyboardButton("2nd Floor (Suites + 201–209)", callback_data="floor_2nd Floor")],
         [InlineKeyboardButton("3rd Floor (Deluxe D1–D16)", callback_data="floor_3rd Floor")],
         [InlineKeyboardButton("4th Floor (401–414)", callback_data="floor_4th Floor")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="back_zone")],
     ])
 
 def room_keyboard(floor):
@@ -128,9 +129,9 @@ def category_keyboard(is_room=True):
     return InlineKeyboardMarkup(rows)
 
 def priority_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(p, callback_data=f"prio_{p}")] for p in PRIORITIES.keys()
-    ])
+    rows = [[InlineKeyboardButton(p, callback_data=f"prio_{p}")] for p in PRIORITIES.keys()]
+    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="back_zone")])
+    return InlineKeyboardMarkup(rows)
 
 def confirm_keyboard():
     return InlineKeyboardMarkup([
@@ -257,11 +258,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
+    # BACK
+    elif data == "back_zone":
+        user_state[chat_id] = {"staff": staff_name}
+        await query.edit_message_text(
+            "🏨 *Hotel Ratanakiri — Maintenance*
+"
+            "Select zone / ជ្រើសរើសតំបន់:",
+            parse_mode="Markdown",
+            reply_markup=zone_keyboard()
+        )
+
     # CONFIRM
     elif data == "confirm":
-        await submit_issue(query, state, chat_id, staff_name)
+        await submit_issue(query, state, chat_id, staff_name, context)
 
-async def submit_issue(query_or_msg, state, chat_id, staff_name):
+async def submit_issue(query_or_msg, state, chat_id, staff_name, context=None):
     try:
         add_row(state)
         is_urgent = "Urgent" in state.get("priority", "")
@@ -282,9 +294,7 @@ async def submit_issue(query_or_msg, state, chat_id, staff_name):
 
         # Alert manager if urgent
         if is_urgent and MANAGER_CHAT_ID:
-            from telegram import Bot
-            bot = Bot(token=BOT_TOKEN)
-            await bot.send_message(
+            await context.bot.send_message(
                 chat_id=MANAGER_CHAT_ID,
                 text=(
                     f"🔴 *URGENT ISSUE — {state.get('zone')} {state.get('room', '')}*\n\n"
@@ -314,7 +324,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if text.lower() != "skip":
             state["note"] = text
         state["step"] = None
-        await submit_issue(update.message, state, chat_id, staff_name)
+        await submit_issue(update.message, state, chat_id, staff_name, context)
     else:
         # Default — show report menu
         user_state[chat_id] = {}
@@ -336,4 +346,6 @@ def main():
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
+    main()
+
     main()
