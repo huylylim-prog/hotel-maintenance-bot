@@ -469,6 +469,33 @@ async def submit_issue(query_or_msg, state, chat_id, staff_name, context=None):
         else:
             await query_or_msg.reply_text(error_text)
 
+
+async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    state = user_state.get(chat_id, {})
+    staff_name = update.effective_user.first_name or "Unknown"
+
+    if state.get("step") == "waiting_photo":
+        state["step"] = None
+        state["has_photo"] = True
+        photo = update.message.photo[-1]
+        caption = (
+            f"📸 *Photo — {state.get('zone')} {state.get('room', '')}*\n"
+            f"🔧 {state.get('category')} | {state.get('priority')}\n"
+            f"👤 {staff_name}"
+        )
+        target = GROUP_CHAT_ID or MANAGER_CHAT_ID
+        if target:
+            await context.bot.send_photo(chat_id=target, photo=photo.file_id, caption=caption, parse_mode="Markdown")
+        await submit_issue(update.message, state, chat_id, staff_name, context)
+    else:
+        user_state[chat_id] = {"staff": staff_name}
+        await update.message.reply_text(
+            "🏨 *Hotel Ratanakiri — Maintenance*\nSelect zone / ជ្រើសរើសតំបន់:",
+            parse_mode="Markdown",
+            reply_markup=zone_keyboard()
+        )
+
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     state = user_state.get(chat_id, {})
