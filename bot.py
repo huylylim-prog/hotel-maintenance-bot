@@ -2,10 +2,13 @@ import os
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
 import json
+import pytz
 
 # ─── LOGGING ─────────────────────────────────────────────────────────────────
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -16,6 +19,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")           # Your Telegram bot token
 MANAGER_CHAT_ID = os.environ.get("MANAGER_CHAT_ID")  # Your Telegram ID
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID")    # Google Sheet ID from URL
 GOOGLE_CREDS_JSON = os.environ.get("GOOGLE_CREDS_JSON")  # Service account JSON as string
+GROUP_CHAT_ID = os.environ.get("GROUP_CHAT_ID", MANAGER_CHAT_ID)  # Group for photos — defaults to manager
 
 # ─── GOOGLE SHEETS SETUP ─────────────────────────────────────────────────────
 def get_sheet():
@@ -27,6 +31,143 @@ def get_sheet():
     client = gspread.authorize(creds)
     sheet = client.open_by_key(SPREADSHEET_ID)
     return sheet.worksheet("🔴 Signalements")
+
+def get_staff_list():
+    """Read staff from Staff sheet — returns list of {name, telegram_id, zones}"""
+    try:
+        creds_dict = json.loads(GOOGLE_CREDS_JSON)
+        creds = Credentials.from_service_account_info(creds_dict, scopes=[
+            "https://spreadsheets.google.com/feeds",
+            "https://www.googleapis.com/auth/drive"
+        ])
+        client = gspread.authorize(creds)
+        sheet = client.open_by_key(SPREADSHEET_ID)
+        ws = sheet.worksheet("👤 Staff")
+        rows = ws.get_all_values()[1:]  # skip header
+        staff = []
+        for row in rows:
+            if len(row) >= 3 and row[0] and row[2] and row[2] != "(after /start)":
+                staff.append({
+                    "name": row[0],
+                    "telegram_id": row[2],
+                    "zones": row[3] if len(row) > 3 else "All",
+                    "active": row[4] if len(row) > 4 else "✓"
+                })
+        return [s for s in staff if s["active"] == "✓"]
+    except Exception as e:
+        logger.error(f"Error reading staff: {e}")
+        return []
+
+def get_daily_tasks():
+    """Read tasks from Tasks sheet filtered by today frequency"""
+    try:
+        creds_dict = json.loads(GOOGLE_CREDS_JSON)
+        creds = Credentials.from_service_account_info(creds_dict, scopes=[
+            "https://spreadsheets.google.com/feeds",
+            "https://www.googleapis.com/auth/drive"
+        ])
+        client = gspread.authorize(creds)
+        sheet = client.open_by_key(SPREADSHEET_ID)
+        ws = sheet.worksheet("⚙️ Tasks")
+        rows = ws.get_all_values()[1:]  # skip header
+        today = datetime.now()
+        tasks = []
+        for row in rows:
+            if len(row) < 6 or not row[0]:
+                continue
+            freq = row[3].strip() if len(row) > 3 else ""
+            active = row[5].strip() if len(row) > 5 else "✓"
+            if active != "✓":
+                continue
+            include = False
+            if freq == "D":
+                include = True
+            elif freq == "W" and today.weekday() == 0:  # Monday
+                include = True
+            elif freq == "M" and today.day == 1:  # 1st of month
+                include = True
+            elif freq == "Q" and today.day == 1 and today.month in [1, 4, 7, 10]:
+                include = True
+            if include:
+                tasks.append({
+                    "task_en": row[0],
+                    "task_kh": row[1] if len(row) > 1 else "",
+                    "zone": row[2] if len(row) > 2 else "",
+                    "freq": freq
+                })
+        return tasks
+    except Exception as e:
+        logger.error(f"Error reading tasks: {e}")
+        return []
+
+async def send_daily_checklist(app):
+    """Send daily checklist to all active staff at 10:00 AM"""
+    logger.info("Sending daily checklist...")
+    staff_list = get_staff_list()
+    tasks = get_daily_tasks()
+
+    if not tasks:
+        logger.warning("No tasks found for today")
+        return
+
+    today_str = datetime.now().strftime("%d/%m/%Y")
+    day_name = datetime.now().strftime("%A")
+
+    # Group tasks by zone
+    zones = {}
+    for t in tasks:
+        zone = t["zone"]
+        if zone not in zones:
+            zones[zone] = []
+        zones[zone].append(t)
+
+    if staff_list:
+        for staff in staff_list:
+            try:
+                # Build personalized message
+                msg = f"\U0001f3e8 *Daily Checklist \u2014 {today_str} ({day_name})*\n"
+                msg += "\u1785\u17c6\u178e\u17bb\u1785\u178f\u17d2\u179a\u17bd\u178f\u1796\u17b7\u1793\u17b7\u178f\u17d2\u1799\u1790\u17d2\u1784\u17d0\n"
+                msg += f"\U0001f464 *{staff['name']}* \u2014 {staff['zones']}\n\n"
+
+                # Add tasks for this staff's zones
+                staff_zones = [z.strip() for z in staff['zones'].split(',')]
+                added = 0
+                for zone, zone_tasks in zones.items():
+                    # Check if zone relevant to this staff
+                    relevant = any(sz.lower() in zone.lower() or zone.lower() in sz.lower()
+                                  or sz.lower() == "all" for sz in staff_zones)
+                    if relevant or "All" in staff['zones']:
+                        if added == 0:
+                            pass
+                        for t in zone_tasks[:5]:  # max 5 per zone
+                            msg += "\u2610 " + t['task_en'] + "\n"
+                            if t['task_kh']:
+                                msg += "   _" + t['task_kh'] + "_\n"
+                        added += len(zone_tasks)
+
+                if added == 0:
+                    # Send all daily tasks if no zone match
+                    for t in tasks[:10]:
+                        msg += "\u2610 " + t['task_en'] + "\n"
+
+                msg += "\n\u2705 All OK? \u2192 type *OK*\n"
+                msg += "\U0001f6a8 Issue? \u2192 tap /report\n"
+                msg += "\u17a2\u17d2\u179c\u17b8\u1798\u17b6\u1793\u1794\u1789\u17d0? \u2192 \u1785\u17bb\u1785 /report"
+
+                await app.bot.send_message(
+                    chat_id=staff['telegram_id'],
+                    text=msg,
+                    parse_mode="Markdown"
+                )
+                logger.info(f"Checklist sent to {staff['name']}")
+            except Exception as e:
+                logger.error(f"Error sending to {staff['name']}: {e}")
+    else:
+        # No staff configured yet — send to manager
+        logger.warning("No staff configured, sending to manager")
+        if MANAGER_CHAT_ID:
+            msg = f"⚠️ Daily checklist ready but no staff configured in Sheet.\nAdd staff Telegram IDs in the Staff tab."
+            await app.bot.send_message(chat_id=MANAGER_CHAT_ID, text=msg)
 
 def add_row(data: dict):
     ws = get_sheet()
@@ -139,6 +280,20 @@ def confirm_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Confirm / បញ្ជាក់", callback_data="confirm"),
          InlineKeyboardButton("✏️ Add note", callback_data="add_note")],
+        [InlineKeyboardButton("📸 Add photo / បន្ថែមរូបថត", callback_data="add_photo")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="back_zone")],
+    ])
+
+def waiting_photo_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏭️ Skip / មិនដាក់រូបថត", callback_data="confirm")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="back_zone")],
+    ])
+
+def waiting_note_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏭️ Skip / មិនដាក់ចំណាំ", callback_data="confirm")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="back_zone")],
     ])
 
 # ─── USER STATE ───────────────────────────────────────────────────────────────
@@ -341,7 +496,21 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("report", report))
     app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+
+    # Schedule daily checklist at 10:00 AM Phnom Penh time
+    tz = pytz.timezone("Asia/Phnom_Penh")
+    scheduler = AsyncIOScheduler(timezone=tz)
+    scheduler.add_job(
+        send_daily_checklist,
+        CronTrigger(hour=10, minute=0, timezone=tz),
+        args=[app],
+        id="daily_checklist"
+    )
+    scheduler.start()
+    logger.info("Scheduler started — daily checklist at 10:00 AM Phnom Penh time")
+
     logger.info("Bot started...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
